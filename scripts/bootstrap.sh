@@ -70,15 +70,30 @@ retry() {
 }
 
 mark "PyTorch (CPU wheel)"
-# CPU-only 索引。默认 PyPI 的 torch 是 CUDA 版，在无 GPU runner 上白下 2GB。
+# CPU-only 索引。默认 PyPI 的 torch 是 CUDA 版，在无 GPU runner 上白下 ~3GB。
+#
+# 版本为什么是 2.6.0：transformers 的 check_torch_load_is_safe() 直接卡
+# `is_torch_greater_or_equal("2.6")`，低于它就连 chinese-roberta 的
+# pytorch_model.bin 都不肯读，抛 CVE-2025-32434 的升级提示。
+# 上游 README 那张表写的 2.5.1 是「测试过的组合」，不是硬约束 ——
+# 它自己的 install.sh 装的是不带版本号的 torch（现在解析成 2.14.x）。
+#
+# 取 2.6.0 而不是最新：2.6 是满足该检查的最低版本，离 2.5.1 最近，
+# 且 GPT-SoVITS/s2_train.py 还在用 `from torch.cuda.amp import GradScaler, autocast`
+# （2.4 起废弃、新版本可能移除的 API），越靠近上游验证过的版本越稳。
 retry "${PIP[@]}" install --no-cache-dir \
-  torch==2.5.1 torchaudio==2.5.1 \
+  'torch==2.6.*' 'torchaudio==2.6.*' \
   --index-url https://download.pytorch.org/whl/cpu
 $VENV_PY - <<'EOF'
 import torch, torchaudio
 print("torch", torch.__version__, "cuda?", torch.cuda.is_available())
 print("torchaudio", torchaudio.__version__)
 assert not torch.cuda.is_available(), "runner 上不该有 CUDA"
+major, minor = torch.__version__.split("+")[0].split(".")[:2]
+assert (int(major), int(minor)) >= (2, 6), f"transformers 要求 torch>=2.6，实得 {torch.__version__}"
+# GPT-SoVITS 训练脚本靠这两个做半精度/混合精度，移除掉就直接 import 不过
+from torch.cuda.amp import GradScaler, autocast  # noqa: F401
+print("torch.cuda.amp 仍可用（s2_train.py 依赖）")
 EOF
 
 mark "GPT-SoVITS requirements.txt"
