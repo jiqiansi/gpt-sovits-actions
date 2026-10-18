@@ -99,12 +99,9 @@ jobs:
           python3.10 -V
 
       # ---------------------------------------------------------------- 依赖
-      # 步骤级超时：job 总时长 240min 只是兜底，真出问题时要让最可疑的一步先自己死，
-      # 否则一个卡死的 pip 会占满整个 job 的时间预算，日志里只有一片空白。
-      - name: 装 Python 依赖
-        timeout-minutes: 25
-        run: REPO_DIR="$PWD" PY=python3.10 bash scripts/bootstrap.sh
-
+      # 先克隆上游仓库再装依赖：bootstrap.sh 要读 GPT-SoVITS/requirements.txt
+      # 作为依赖清单的单一事实来源，顺序反了会得到一个几乎为空的清单，
+      # 而 pip 对空清单照样返回成功，失败会一路推到合成那步才炸。
       - name: 克隆 GPT-SoVITS
         timeout-minutes: 5
         run: |
@@ -112,7 +109,14 @@ jobs:
             https://github.com/RVC-Boss/GPT-SoVITS.git GPT-SoVITS
           echo "== GPT-SoVITS commit =="
           git -C GPT-SoVITS rev-parse HEAD
-          ls GPT-SoVITS
+          ls GPT-SoVITS/requirements.txt
+          wc -l GPT-SoVITS/requirements.txt
+
+      # 步骤级超时：job 总时长 240min 只是兜底，真出问题时要让最可疑的一步先自己死，
+      # 否则一个卡死的 pip 会占满整个 job 的时间预算，日志里只有一片空白。
+      - name: 装 Python 依赖
+        timeout-minutes: 25
+        run: REPO_DIR="$PWD" PY=python3.10 bash scripts/bootstrap.sh
 
       - name: 下载预训练权重
         timeout-minutes: 20

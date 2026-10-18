@@ -83,16 +83,30 @@ EOF
 
 mark "GPT-SoVITS requirements.txt"
 REQ="$CACHE/reqs-fixed.txt"
+# 依赖清单直接取上游仓库的 requirements.txt（单一事实来源，不维护副本），
+# 所以必须先克隆 GPT-SoVITS 再跑本脚本。缺文件时 grep 会安静地产出空文件 ——
+# 那样 pip 照样返回成功，最后炸在离根因十万八千里的 import 上，所以这里显式拦。
+if [ ! -f "$GSV_DIR/requirements.txt" ]; then
+  echo "!! 找不到 $GSV_DIR/requirements.txt" >&2
+  echo "   GPT-SoVITS 必须在跑 bootstrap 之前克隆好（workflow 里就是这个顺序）。" >&2
+  exit 1
+fi
 if [ ! -f "$REQ" ] || [ "${REFRESH_REQS:-0}" = "1" ]; then
   # 过滤掉三条在 x86_64 CI 上会出问题的行（原因见文件头注释）
   grep -v -E '^(torch$|torchaudio$|onnxruntime-gpu|onnxruntime;|--no-binary)' \
-    "$GSV_DIR/requirements.txt" > "$REQ"
+    "$GSV_DIR/requirements.txt" > "$REQ.tmp"
+  mv "$REQ.tmp" "$REQ"
   # soundfile：webui/api 保存 wav 时用，requirements 里没有（靠 librosa 间接带进来）
   echo "soundfile" >> "$REQ"
   # CPU 版 onnxruntime，替代 requirements 里 x86_64 才会装的 onnxruntime-gpu
   echo "onnxruntime" >> "$REQ"
 fi
-echo "--- 实际安装的依赖（已过滤）---"
+LINES=$(grep -cve '^\s*$' "$REQ" || true)
+if [ "$LINES" -lt 30 ]; then
+  echo "!! 过滤后的依赖只剩 $LINES 行，八成是 requirements.txt 没读到（实得 $GSV_DIR/requirements.txt）" >&2
+  exit 1
+fi
+echo "--- 实际安装的依赖（已过滤，$LINES 行）---"
 cat "$REQ"
 retry "${PIP[@]}" install --no-cache-dir -r "$REQ"
 
