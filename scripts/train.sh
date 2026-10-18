@@ -46,7 +46,9 @@ case "$VERSION" in
     PRE_S2D="GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s2D2333k.pth"
     ;;
 esac
-S2_CONFIG="$GSV/configs/s2.json"
+# 配置在 GPT_SoVITS/configs/ 下（仓库根没有 configs/ 这一层）
+S2_CONFIG="$GSV/GPT_SoVITS/configs/s2.json"
+S1_TPL="$GSV/GPT_SoVITS/configs/s1longer-v2.yaml"
 
 cd "$GSV" || exit 1
 # 权重输出目录必须写成绝对路径。
@@ -89,6 +91,13 @@ run_py() {
 
 [ -f "$LIST_FILE" ] || { echo "找不到 $LIST_FILE，先跑 scripts/make_list.py"; exit 1; }
 mkdir -p "$OUT"
+# 两个配置模板先验：路径写错时 utils.get_hparams 会在很后面才报 FileNotFoundError，
+# 而那时前面三个 prepare 脚本已经跑完，白等几分钟还不一定看得出根因。
+for cfg in "$S1_TPL" "$S2_CONFIG"; do
+  [ -f "$cfg" ] || { echo "!! 配置不存在: $cfg（应该在 GPT_SoVITS/configs/ 下）" >&2; exit 1; }
+done
+echo "s1 模板: $S1_TPL"
+echo "s2 模板: $S2_CONFIG"
 
 # ---------------------------------------------------------------- ② 音素 + BERT
 mark "② 1-get-text.py：生成 2-name2text.txt（音素序列 + 中文 BERT 特征）"
@@ -125,7 +134,7 @@ export OUT EXP_NAME GPT_BS GPT_EPOCHS S2_BS S2_EPOCHS VERSION PRE_S1 PRE_S2G PRE
 # ------------------------------------------------------------------ ⑤ 微调 GPT
 mark "⑤ s1_train.py：微调 GPT（$GPT_EPOCHS epoch）"
 S1_CFG="$OUT/tmp_s1.yaml"
-"$VENV_PY" - "$GSV/configs/s1longer-v2.yaml" "$S1_CFG" <<'PYEOF'
+"$VENV_PY" - "$S1_TPL" "$S1_CFG" <<'PYEOF'
 import sys, yaml, os
 src, dst = sys.argv[1], sys.argv[2]
 d = yaml.safe_load(open(src, encoding="utf8"))
