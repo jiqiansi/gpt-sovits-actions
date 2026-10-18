@@ -99,10 +99,18 @@ else
 fi
 
 # ------------------------------------------------- nltk 数据（英文/混合语句要用）
-# 只有 9.9MB，中文单独跑其实用不到，但英文文本会在 1-get-text 时 import nltk，
-# 缺了会报 LookupError。宁可多下这 10MB。
+# 中文单独跑其实用不到，但目标文本里只要出现拉丁字母（"GitHub Actions"、"CPU"），
+# LangSegmenter 就会切出一个英文段并走 english.py -> nltk.pos_tag，
+# 缺数据直接 LookupError: averaged_perceptron_tagger_eng。
+#
+# 位置是硬要求：nltk.data.path 只查 NLTK_DATA / ~/nltk_data / sys.prefix/nltk_data
+# 等少数几处，**没有 CWD 相对路径**。所以必须解到 venv 根下（= sys.prefix/nltk_data），
+# 这也正是上游 install.sh 的 `unzip -d "$PY_PREFIX"` 在做的事。
+# 之前解到 GPT-SoVITS/nltk_data 是解了个寂寞 —— 文件都在，就是没人去找。
 mark "nltk 数据"
-if [ ! -d "$GSV/nltk_data/taggers" ]; then
+NLTK_DIR="${VENV_PREFIX:-$REPO_DIR/.venv}/nltk_data"
+if [ ! -d "$NLTK_DIR/taggers" ]; then
+  mkdir -p "$(dirname "$NLTK_DIR")"
   TMPN=$(mktemp /tmp/nltk.XXXXXX.zip)
   ok=0
   for i in 1 2 3 4 5; do
@@ -111,14 +119,16 @@ if [ ! -d "$GSV/nltk_data/taggers" ]; then
     echo "  第 $i 次失败，10s 后重试"; sleep 10
   done
   if [ "$ok" = "1" ]; then
-    unzip -o -q "$TMPN" -d "$GSV/"
+    # zip 顶层就是 nltk_data/ 目录，解到 venv 根下正好生成 <venv>/nltk_data
+    unzip -o -q "$TMPN" -d "$(dirname "$NLTK_DIR")"
     rm -f "$TMPN"
   else
-    echo "  [warn] nltk_data 下载失败，英文文本会不可用（中文不受影响）"
+    echo "  [warn] nltk_data 下载失败，含英文的文本会不可用（纯中文不受影响）"
   fi
 else
-  echo "  [skip] nltk_data 已存在"
+  echo "  [skip] nltk_data 已存在 ($NLTK_DIR)"
 fi
+echo "  tagger: $(ls "$NLTK_DIR/taggers" 2>/dev/null | tr '\n' ' ')"
 
 mark "权重校验"
 echo "--- 文件清单与大小 ---"

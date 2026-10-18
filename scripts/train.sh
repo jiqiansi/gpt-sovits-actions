@@ -49,6 +49,16 @@ esac
 S2_CONFIG="$GSV/configs/s2.json"
 
 cd "$GSV" || exit 1
+# 权重输出目录必须写成绝对路径。
+# 上游 webui 用的是相对路径 "GPT_weights_v2"，而它在 GPT-SoVITS 目录里启动，
+# 所以权重落在那里。我们这里的 cwd 同样是 $GSV，但 workflow 收集产物和
+# tts_synthesize.py 找最新权重都是按 workspace 根算的 —— 写相对路径的话
+# 训练会成功、产物却永远收集不到，而且两边都不会报错。
+GPT_W="$REPO_DIR/GPT_weights_v2"
+SOV_W="$REPO_DIR/SoVITS_weights_v2"
+mkdir -p "$GPT_W" "$SOV_W"
+export GPT_W SOV_W
+
 export PYTHONPATH="$GSV:$GSV/GPT_SoVITS:${PYTHONPATH:-}"
 export is_half=False
 export version="$VERSION"
@@ -56,6 +66,8 @@ export hz=25hz
 export CUDA_VISIBLE_DEVICES=""
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=$(nproc)
+# nltk 在 CI 上只找 NLTK_DATA / sys.prefix/nltk_data，显式指一份更保险
+[ -d "$REPO_DIR/.venv/nltk_data" ] && export NLTK_DATA="$REPO_DIR/.venv/nltk_data"
 
 # 三个 prepare 脚本共用的环境变量
 export inp_text="$LIST_FILE"
@@ -131,7 +143,7 @@ d["train"]["if_save_latest"] = 1
 d["train"]["if_save_every_weights"] = True
 d["train"]["if_dpo"] = False
 d["train"]["exp_name"] = exp
-d["train"]["half_weights_save_dir"] = "GPT_weights_v2"
+d["train"]["half_weights_save_dir"] = os.environ["GPT_W"]   # 绝对路径，见文件头注释
 d["data"]["num_workers"] = 2                          # runner 只有 2-4 核
 d["pretrained_s1"] = os.environ["PRE_S1"]
 d["train_semantic_path"] = out + "/6-name2semantic.tsv"
@@ -155,7 +167,7 @@ d["version"] = os.environ["VERSION"]
 d["name"] = exp
 d["data"]["exp_dir"] = out
 d["s2_ckpt_dir"] = out
-d["save_weight_dir"] = "SoVITS_weights_v2"
+d["save_weight_dir"] = os.environ["SOV_W"]   # 绝对路径，见文件头注释
 d["train"]["fp16_run"] = False                        # CPU：关闭 fp16 autocast
 d["train"]["batch_size"] = max(1, int(os.environ["S2_BS"]) // 2)
 d["train"]["epochs"] = int(os.environ["S2_EPOCHS"])

@@ -34,6 +34,14 @@ def find_gsv_root() -> Path:
 
 
 GSV = find_gsv_root()
+
+# nltk 只在 NLTK_DATA / ~/nltk_data / sys.prefix/nltk_data 这几处找数据，
+# 没有 cwd 相对路径。这里在 import 任何会拉起 nltk 的模块之前先把它指过去，
+# 免得 nltk_data 恰好没解到 venv 根下时，英文段直接 LookupError。
+_nltk_dir = ROOT / ".venv" / "nltk_data"
+if _nltk_dir.is_dir():
+    os.environ.setdefault("NLTK_DATA", str(_nltk_dir))
+
 # TTS_infer_pack 内部有大量 `from tools.xxx import` / `from module.xxx import`，
 # 这些包位于 GPT_SoVITS/ 下，所以 GPT_SoVITS 目录本身必须在 sys.path 里。
 sys.path.insert(0, str(GSV))
