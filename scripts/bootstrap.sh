@@ -115,6 +115,10 @@ if [ ! -f "$REQ" ] || [ "${REFRESH_REQS:-0}" = "1" ]; then
   echo "soundfile" >> "$REQ"
   # CPU 版 onnxruntime，替代 requirements 里 x86_64 才会装的 onnxruntime-gpu
   echo "onnxruntime" >> "$REQ"
+  # resampy：TTS_infer_pack 的 _set_prompt_semantic 硬编码 match_librosa=True，
+  # 参考音频 32k->16k 那一步必然 import resampy，但上游 requirements.txt 里没有它
+  # （Windows 整合包里带了，所以本地没人发现）。0.4.3 是 py3-none-any 纯 Python wheel。
+  echo "resampy" >> "$REQ"
 fi
 LINES=$(grep -cve '^\s*$' "$REQ" || true)
 if [ "$LINES" -lt 30 ]; then
@@ -134,6 +138,7 @@ import importlib, sys
 mods = ["torch", "torchaudio", "transformers", "librosa", "peft",
         "pytorch_lightning", "onnxruntime", "pyopenjtalk",
         "jieba_fast", "soundfile", "numpy", "scipy", "fast_langdetect",
+        "resampy",
         "split_lang", "wordsegment", "g2p_en", "cn2an", "pypinyin", "opencc"]
 bad = []
 for m in mods:
