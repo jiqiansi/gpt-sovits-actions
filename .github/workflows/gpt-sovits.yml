@@ -47,8 +47,14 @@ permissions:
 jobs:
   run:
     name: ${{ inputs.mode }} · ${{ inputs.version }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 330
+    # 钉死 24.04，不用 ubuntu-latest：
+    # ubuntu-latest 从 2026-10-19 起往 26.04 迁，26.04 默认 Python 是 3.14，
+    # 而本流水线整条链路是照着 3.10 编译/验证的（deadsnakes 装 3.10 + pyopenjtalk 现场编译）。
+    # 镜像一换，最可能先炸的就是这一步。
+    runs-on: ubuntu-24.04
+    # 实测各步预算：依赖 ~2min、权重 ~2min、合成 ~5min、上传 ~10s。
+    # 240 分钟留了充足余量，又远低于 GitHub 的 6 小时硬上限。
+    timeout-minutes: 240
     env:
       EXP_NAME: demo_voice
       VERSION: ${{ inputs.version }}
@@ -73,15 +79,14 @@ jobs:
           echo "== 磁盘（跑之前）=="; df -h /
           echo "== Python =="; ls /usr/bin/python3* /usr/share/miniconda/bin/python* 2>/dev/null
 
-      # runner 镜像里塞了一堆用不到的东西（.NET / Swift / CodeQL / Android SDK / 两个版本的 ghc）。
-      # 微调要下 1.6GB 权重 + 编译 pyopenjtalk，先把磁盘腾出来更稳。
-      - name: 腾磁盘
+      # 公开仓库的 runner 实测是 4 vCPU / 16GiB / 145GB 盘（约 86GB 可用），
+      # 本流水线最重的一次下载也就 1.7GB 权重，所以不值得再花 3 分钟删镜像里的
+      # Android SDK / .NET（那套 jlumbroso/free-disk-space 实测要 178s）。
+      # 真要把 venv+权重+训练中间产物全塞进 job 也用不到 30GB。
+      - name: 看磁盘余量
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                       /usr/local/.ghcup /opt/hostedtoolcache/CodeQL 2>/dev/null || true
-          sudo docker image prune -af >/dev/null 2>&1 || true
-          sudo apt-get clean
-          echo "== 磁盘（清理后）=="; df -h /
+          df -h /
+          echo "可用: $(df -BG --output=avail / | tail -1 | tr -d ' ')"
 
       - name: 安装 python3.10
         run: |
@@ -94,10 +99,14 @@ jobs:
           python3.10 -V
 
       # ---------------------------------------------------------------- 依赖
+      # 步骤级超时：job 总时长 240min 只是兜底，真出问题时要让最可疑的一步先自己死，
+      # 否则一个卡死的 pip 会占满整个 job 的时间预算，日志里只有一片空白。
       - name: 装 Python 依赖
+        timeout-minutes: 25
         run: REPO_DIR="$PWD" PY=python3.10 bash scripts/bootstrap.sh
 
       - name: 克隆 GPT-SoVITS
+        timeout-minutes: 5
         run: |
           git clone --depth 1 --branch "$GSV_REF" \
             https://github.com/RVC-Boss/GPT-SoVITS.git GPT-SoVITS
@@ -106,6 +115,7 @@ jobs:
           ls GPT-SoVITS
 
       - name: 下载预训练权重
+        timeout-minutes: 20
         run: REPO_DIR="$PWD" NEED_D="${{ inputs.mode == 'infer' && '0' || '1' }}" bash scripts/fetch_models.sh
 
       - name: 磁盘占用（权重下载后）
@@ -119,6 +129,7 @@ jobs:
 
       - name: 微调（s1 + s2）
         if: inputs.mode != 'infer'
+        timeout-minutes: 150
         run: |
           REPO_DIR="$PWD" VENV_PY="$PWD/.venv/bin/python" bash scripts/train.sh
 
@@ -129,9 +140,11 @@ jobs:
           cp -v GPT_weights_v2/*.ckpt  artifacts/weights/ 2>/dev/null || true
           cp -v SoVITS_weights_v2/*.pth artifacts/weights/ 2>/dev/null || true
           ls -lh artifacts/weights || true
+          du -sh artifacts/weights 2>/dev/null || true
 
       # ---------------------------------------------------------------- 合成
       - name: 合成语音
+        timeout-minutes: 30
         run: |
           mkdir -p data/out
           .venv/bin/python scripts/tts_synthesize.py \
@@ -167,7 +180,7 @@ jobs:
           path: |
             data/out/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
       - name: 上传微调权重
         if: inputs.mode != 'infer' && hashFiles('artifacts/weights/*') != ''
@@ -176,7 +189,7 @@ jobs:
           name: finetuned-weights-${{ inputs.version }}
           path: artifacts/weights/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
 
       - name: 上传训练中间产物（排查用）
         if: failure() || inputs.mode != 'infer'

@@ -121,8 +121,13 @@ exp = os.environ["EXP_NAME"]; out = os.environ["OUT"]
 d["train"]["precision"] = "32"                       # CPU 必须用 32
 d["train"]["batch_size"] = int(os.environ["GPT_BS"])
 d["train"]["epochs"] = int(os.environ["GPT_EPOCHS"])
-d["train"]["save_every_n_epoch"] = max(1, int(os.environ["GPT_EPOCHS"]) // 2)
-d["train"]["if_save_latest"] = 0
+# 只在最后一个 epoch 导出一次权重。上游默认每个 epoch 都导，
+# v2 的 GPT 是 24 层，半精度导出约 150MB/个 —— 12 个 epoch 就是 1.8GB，
+# 直接吃掉免费账号 500MB artifact 配额的三倍多。
+d["train"]["save_every_n_epoch"] = int(os.environ["GPT_EPOCHS"])
+# 只留最新一份带优化器状态的完整 ckpt（它比导出的权重大 5-6 倍，
+# 不清的话 12 个 epoch 会在 runner 上堆出 ~10GB）
+d["train"]["if_save_latest"] = 1
 d["train"]["if_save_every_weights"] = True
 d["train"]["if_dpo"] = False
 d["train"]["exp_name"] = exp
@@ -154,7 +159,9 @@ d["save_weight_dir"] = "SoVITS_weights_v2"
 d["train"]["fp16_run"] = False                        # CPU：关闭 fp16 autocast
 d["train"]["batch_size"] = max(1, int(os.environ["S2_BS"]) // 2)
 d["train"]["epochs"] = int(os.environ["S2_EPOCHS"])
-d["train"]["save_every_epoch"] = max(1, int(os.environ["S2_EPOCHS"]) // 2)
+# 只在最后一个 epoch 导出一次。s2_train 的循环是 range(1, epochs+1)，
+# 所以 save_every_epoch 设成 epochs 正好在最后一次命中（设成 0 会一次都不存）。
+d["train"]["save_every_epoch"] = int(os.environ["S2_EPOCHS"])
 d["train"]["if_save_latest"] = 1                      # 只留最新，省 runner 磁盘
 d["train"]["if_save_every_weights"] = True
 d["train"]["gpu_numbers"] = ""                        # s2_train 会读它，必须存在
