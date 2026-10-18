@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# GPT-SoVITS 微调全链路（CPU 版）。
+#
+# 一次跑完 WebUI 上的四个按钮：
+#   ① 语音切分（这里跳过，因为 data/raw/train/ 里已经是切好的短句）
+#   ② 开源格式 -> 2-name2text.txt（BERT 音素特征）
+#   ③ -> 4-cnhubert/*.pt + 5-wav32k/*.wav（HuBERT 特征与 32k 音频）
+#   ④ -> 6-name2semantic.tsv（用预训练 SoVITS 提取语义 token）
+#   ⑤ s1_train.py 微调 GPT（t2s 模型）
+#   ⑥ s2_train.py 微调 SoVITS
+#
+# 全部靠环境变量驱动，和 WebUI 的 open1a/open1Bb/open1Ba 完全一致。
+#
+# CPU 上的两处关键调整（不改必出问题）：
+#   is_half=False  —— 半精度只在 CUDA 上有意义，CPU 上强行 .half() 会变慢甚至 NaN
+#   s1 precision=32 —— 3.16-mixed 在 CPU 上会被 pytorch-lightning 静默换成 bf16-mixed，
+#                      既慢又可能丢精度，直接钉成 32
+set -uo pipefail
+
+REPO_DIR=${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+GSV="$REPO_DIR/GPT-SoVITS"
+VENV_PY=${VENV_PY:-"$REPO_DIR/.venv/bin/python"}
+
+EXP_NAME=${EXP_NAME:-demo_voice}
+VERSION=${VERSION:-v2}
+GPT_EPOCHS=${GPT_EPOCHS:-12}
+S2_EPOCHS=${S2_EPOCHS:-8}
+GPT_BS=${GPT_BS:-2}
+S2_BS=${S2_BS:-2}
+
+LIST_FILE="$REPO_DIR/logs/$EXP_NAME/dataset.list"
+OUT="$REPO_DIR/logs/$EXP_NAME"
+
+mark() { echo; echo "########## $* ##########"; }
+
+# 预训练权重：版本不同文件名不同，统一收敛到两个变量里
+case "$VERSION" in
+  v1)
+    PRE_S1="GPT_SoVITS/pretrained_models/s1bert25hz-2kh-longer-epoch=68e-step=50232.ckpt"
+    PRE_S2G="GPT_SoVITS/pretrained_models/s2G488k.pth"
+    PRE_S2D="GPT_SoVITS/pretrained_models/s2D488k.pth"
+    ;;
+  v2|*)
+    PRE_S1="GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt"
+    PRE_S2G="GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s2G2333k.pth"
+    PRE_S2D="GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s2D2333k.pth"
+    ;;
+esac
+S2_CONFIG="$GSV/configs/s2.json"
+
+cd "$GSV" || exit 1
+export PYTHONPATH="$GSV:$GSV/GPT_SoVITS:${PYTHONPATH:-}"
+export is_half=False
+export version="$VERSION"
+export hz=25hz
+export CUDA_VISIBLE_DEVICES=""
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS=$(nproc)
+
+# 三个 prepare 脚本共用的环境变量
+export inp_text="$LIST_FILE"
+export inp_wav_dir=""
+export exp_name="$EXP_NAME"
+export i_part=0
+export all_parts=1
+export opt_dir="$OUT"
+
+run_py() {
+  local name="$1"; shift
+  mark "$name"
+  echo "python $*"
+  "$VENV_PY" "$@"
+  local rc=$?
+  [ $rc -ne 0 ] && { echo "!! $name 失败 (exit $rc)"; exit $rc; }
+  return 0
+}
+
+[ -f "$LIST_FILE" ] || { echo "找不到 $LIST_FILE，先跑 scripts/make_list.py"; exit 1; }
+mkdir -p "$OUT"
+
+# ---------------------------------------------------------------- ② 音素 + BERT
+mark "② 1-get-text.py：生成 2-name2text.txt（音素序列 + 中文 BERT 特征）"
+export bert_pretrained_dir="$GSV/GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"
+run_py "1-get-text" GPT_SoVITS/prepare_datasets/1-get-text.py
+# WebUI 这里会把 2-name2text-<i>.txt 合并成 2-name2text.txt；单进程下就是重命名
+cat "$OUT/2-name2text-0.txt" > "$OUT/2-name2text.txt"
+echo "2-name2text.txt 行数: $(wc -l < "$OUT/2-name2text.txt")"
+
+# ------------------------------------------------------------ ③ HuBERT + 32k wav
+mark "③ 2-get-hubert-wav32k.py：生成 4-cnhubert/ 与 5-wav32k/"
+# 注意变量名是 cnhubert_base_dir，不是配置文件里的 cnhuhbert_base_path（上游拼写不一致）
+export cnhubert_base_dir="$GSV/GPT_SoVITS/pretrained_models/chinese-hubert-base"
+run_py "2-get-hubert" GPT_SoVITS/prepare_datasets/2-get-hubert-wav32k.py
+
+# -------------------------------------------------------------- ④ 语义 token
+mark "④ 3-get-semantic.py：生成 6-name2semantic.tsv"
+export pretrained_s2G="$GSV/$PRE_S2G"
+export s2config_path="$S2_CONFIG"
+run_py "3-get-semantic" GPT_SoVITS/prepare_datasets/3-get-semantic.py
+printf 'item_name\tsemantic_audio\n' > "$OUT/6-name2semantic.tsv"
+cat "$OUT/6-name2semantic-0.tsv" >> "$OUT/6-name2semantic.tsv"
+
+for f in "$OUT/2-name2text.txt" "$OUT/6-name2semantic.tsv" "$OUT/4-cnhubert" "$OUT/5-wav32k"; do
+  [ -e "$f" ] || { echo "!! 缺少 $f"; exit 1; }
+done
+echo "hubert 特征数: $(ls "$OUT/4-cnhubert" | wc -l)，32k wav 数: $(ls "$OUT/5-wav32k" | wc -l)"
+du -sh "$OUT"
+
+# 生成配置的两段 Python 只能从环境变量取参数：heredoc 里的 $ 会被 bash 先展开，
+# 所以一律用引号版 <<'PYEOF'，把取值全部推到 os.environ。
+export OUT EXP_NAME GPT_BS GPT_EPOCHS S2_BS S2_EPOCHS VERSION PRE_S1 PRE_S2G PRE_S2D
+
+# ------------------------------------------------------------------ ⑤ 微调 GPT
+mark "⑤ s1_train.py：微调 GPT（$GPT_EPOCHS epoch）"
+S1_CFG="$OUT/tmp_s1.yaml"
+"$VENV_PY" - "$GSV/configs/s1longer-v2.yaml" "$S1_CFG" <<'PYEOF'
+import sys, yaml, os
+src, dst = sys.argv[1], sys.argv[2]
+d = yaml.safe_load(open(src, encoding="utf8"))
+exp = os.environ["EXP_NAME"]; out = os.environ["OUT"]
+d["train"]["precision"] = "32"                       # CPU 必须用 32
+d["train"]["batch_size"] = int(os.environ["GPT_BS"])
+d["train"]["epochs"] = int(os.environ["GPT_EPOCHS"])
+d["train"]["save_every_n_epoch"] = max(1, int(os.environ["GPT_EPOCHS"]) // 2)
+d["train"]["if_save_latest"] = 0
+d["train"]["if_save_every_weights"] = True
+d["train"]["if_dpo"] = False
+d["train"]["exp_name"] = exp
+d["train"]["half_weights_save_dir"] = "GPT_weights_v2"
+d["data"]["num_workers"] = 2                          # runner 只有 2-4 核
+d["pretrained_s1"] = os.environ["PRE_S1"]
+d["train_semantic_path"] = out + "/6-name2semantic.tsv"
+d["train_phoneme_path"] = out + "/2-name2text.txt"
+d["output_dir"] = out + "/logs_s1"
+yaml.safe_dump(d, open(dst, "w", encoding="utf8"), allow_unicode=True, sort_keys=False)
+print("s1 config ->", dst)
+PYEOF
+run_py "s1_train" GPT_SoVITS/s1_train.py --config_file "$S1_CFG"
+
+# --------------------------------------------------------------- ⑥ 微调 SoVITS
+mark "⑥ s2_train.py：微调 SoVITS（$S2_EPOCHS epoch）"
+S2_CFG="$OUT/tmp_s2.json"
+"$VENV_PY" - "$S2_CONFIG" "$S2_CFG" <<'PYEOF'
+import sys, json, os
+src, dst = sys.argv[1], sys.argv[2]
+d = json.load(open(src))
+exp = os.environ["EXP_NAME"]; out = os.environ["OUT"]
+d["model"]["version"] = os.environ["VERSION"]
+d["version"] = os.environ["VERSION"]
+d["name"] = exp
+d["data"]["exp_dir"] = out
+d["s2_ckpt_dir"] = out
+d["save_weight_dir"] = "SoVITS_weights_v2"
+d["train"]["fp16_run"] = False                        # CPU：关闭 fp16 autocast
+d["train"]["batch_size"] = max(1, int(os.environ["S2_BS"]) // 2)
+d["train"]["epochs"] = int(os.environ["S2_EPOCHS"])
+d["train"]["save_every_epoch"] = max(1, int(os.environ["S2_EPOCHS"]) // 2)
+d["train"]["if_save_latest"] = 1                      # 只留最新，省 runner 磁盘
+d["train"]["if_save_every_weights"] = True
+d["train"]["gpu_numbers"] = ""                        # s2_train 会读它，必须存在
+d["train"]["pretrained_s2G"] = os.environ["PRE_S2G"]
+d["train"]["pretrained_s2D"] = os.environ["PRE_S2D"]
+d["train"]["grad_ckpt"] = False
+d["train"]["lora_rank"] = 0
+json.dump(d, open(dst, "w"), indent=2)
+print("s2 config ->", dst)
+PYEOF
+run_py "s2_train" GPT_SoVITS/s2_train.py --config "$S2_CFG"
+
+mark "微调完成，产物："
+find "$REPO_DIR/GPT_weights_v2" "$REPO_DIR/SoVITS_weights_v2" -type f 2>/dev/null | sort
+du -sh "$REPO_DIR/GPT_weights_v2" "$REPO_DIR/SoVITS_weights_v2" 2>/dev/null

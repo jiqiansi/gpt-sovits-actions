@@ -1,0 +1,18 @@
+# 运行期产物，不进仓库
+.venv/
+GPT-SoVITS/
+logs/
+artifacts/
+GPT_weights*/
+SoVITS_weights*/
+TEMP/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 任何 token / 密钥一律不提交
+token.txt
+*.token
+.htoken
+ghtoken*
+.env

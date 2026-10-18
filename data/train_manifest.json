@@ -1,0 +1,23 @@
+{
+  "comment": [
+    "训练集清单：scripts/make_list.py 读这个文件生成 GPT-SoVITS 需要的 dataset.list。",
+    "字段：wav = data/raw/train/ 下的文件名（不含路径），text = 与该音频逐字对应的文本。",
+    "关键约束：text 必须和音频里说出来的字完全一致，一个字都不能差。",
+    "GPT-SoVITS 的 .list 行格式是 <wav 绝对路径>|<说话人>|<语言>|<文本>，语言用 zh / en / ja / ko / yue。",
+    "",
+    "这两段音频的切点不是估的：用 ffmpeg silencedetect 找到了实测停顿位置，",
+    "在「参考音频。」后面的静音（5.027–5.518s）处下刀，所以不会切到半个字。"
+  ],
+  "speaker": "demo",
+  "language": "zh",
+  "clips": [
+    {
+      "wav": "01.wav",
+      "text": "我是一名配音演员，正在录制参考音频。"
+    },
+    {
+      "wav": "02.wav",
+      "text": "这段话用来克隆我的音色，语速平稳，声音清晰。"
+    }
+  ]
+}
