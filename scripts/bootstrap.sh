@@ -27,9 +27,11 @@ nproc | sed 's/^/nproc: /'
 df -h / | tail -1
 $PY -V
 
-# 大块头都放 /mnt（GitHub runner 的 / 只有 ~70GB 可用，但 /mnt 是独立的大盘）
-CACHE=${CACHE:-/mnt/gsv-cache}
-mkdir -p "$CACHE/wheels" "$CACHE/hf"
+# 缓存目录：GitHub runner 的 /mnt 属 root，普通用户 mkdir 会静默失败，
+# 结果就是后面重定向到那里直接 ENOENT。所以默认放在 workspace 里（已在 .gitignore）。
+CACHE=${CACHE:-"$REPO_DIR/.cache"}
+mkdir -p "$CACHE" || { echo "!! 建不了缓存目录 $CACHE"; exit 1; }
+echo "cache dir: $CACHE ($(df -h "$CACHE" | tail -1 | awk '{print $4}') free)"
 
 mark "APT: cmake / gcc-11 / ffmpeg"
 export DEBIAN_FRONTEND=noninteractive
@@ -95,7 +97,10 @@ cat "$REQ"
 retry "${PIP[@]}" install --no-cache-dir -r "$REQ"
 
 mark "校验关键 import"
-$VENV_PY - <<'EOF'
+# 这一段是整条流水线的闸门。它必须真的能把 job 拦下来 ——
+# 之前这里失败了却继续往下跑，后面的步骤在空 venv 里连 numpy 都没有，
+# 报出来的错离根因十万八千里。所以显式检查退出码，别指望 set -e。
+if ! $VENV_PY - <<'EOF'
 import importlib, sys
 mods = ["torch", "torchaudio", "transformers", "librosa", "peft",
         "pytorch_lightning", "onnxruntime", "pyopenjtalk",
@@ -112,7 +117,16 @@ for m, e in bad:
 print("OK" if not bad else f"{len(bad)} 个模块导入失败")
 sys.exit(1 if bad else 0)
 EOF
+then
+  echo "!! 依赖没装全，后面每一步都会莫名其妙失败，这里直接停。"
+  echo "   已装的包："
+  "$VENV_PY" -m pip list 2>/dev/null | head -40
+  exit 1
+fi
 
 mark "bootstrap 完成"
 echo "venv: $REPO_DIR/.venv"
 du -sh "$REPO_DIR/.venv"
+# 磁盘吃紧时清掉 pip 缓存，后面还要下 1.6GB 权重
+"$VENV_PY" -m pip cache purge >/dev/null 2>&1 || true
+df -h / | tail -1

@@ -18,12 +18,27 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-GSV = ROOT / "GPT-SoVITS"
+
+
+def find_gsv_root() -> Path:
+    """定位 GPT-SoVITS 的仓库根目录。
+
+    上游把所有相对路径都写成 `GPT_SoVITS/pretrained_models/...`、`tools/...`，
+    也就是说必须以 GPT-SoVITS 那个目录当 cwd 才能跑。
+    CI 上它被 clone 到 <repo>/GPT-SoVITS/，本地开发时可能就是 <repo> 本身。
+    """
+    for cand in (ROOT / "GPT-SoVITS", ROOT):
+        if (cand / "GPT_SoVITS" / "TTS_infer_pack").is_dir() and (cand / "tools").is_dir():
+            return cand
+    raise SystemExit(f"找不到 GPT-SoVITS 目录，试过 {ROOT / 'GPT-SoVITS'} 和 {ROOT}")
+
+
+GSV = find_gsv_root()
 # TTS_infer_pack 内部有大量 `from tools.xxx import` / `from module.xxx import`，
 # 这些包位于 GPT_SoVITS/ 下，所以 GPT_SoVITS 目录本身必须在 sys.path 里。
 sys.path.insert(0, str(GSV))
 sys.path.insert(0, str(GSV / "GPT_SoVITS"))
-os.chdir(ROOT)
+os.chdir(GSV)   # 上游所有权重/模型路径都是相对这个 cwd 写的
 
 
 def pick_latest(pattern_dir: Path, suffix: str):
@@ -50,6 +65,21 @@ def default_weights():
     )
 
 
+def resolve(p: str) -> Path:
+    """把用户给的相对路径落到实际存在的目录。
+
+    cwd 已经切到 GSV（为了兼容上游那堆相对路径），但 --out / --ref-audio
+    这类由本仓库提供的路径是相对仓库根写死的，两个地方都要试。
+    """
+    pp = Path(p)
+    if pp.is_absolute():
+        return pp
+    for base in (ROOT, GSV):
+        if (base / pp).exists():
+            return base / pp
+    return ROOT / pp
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--text", required=True, help="要合成的目标文本")
@@ -64,13 +94,13 @@ def main() -> int:
     ap.add_argument("--temperature", type=float, default=1.0)
     args = ap.parse_args()
 
-    ref_audio = ROOT / args.ref_audio
+    ref_audio = resolve(args.ref_audio)
     if not ref_audio.exists():
         print(f"参考音频不存在: {ref_audio}", file=sys.stderr)
         return 1
 
     if args.ref_text is None:
-        ref_text_file = ROOT / "data" / "ref_text.txt"
+        ref_text_file = resolve("data/ref_text.txt")
         if ref_text_file.exists():
             args.ref_text = ref_text_file.read_text(encoding="utf8").strip()
         else:
@@ -83,9 +113,13 @@ def main() -> int:
         gpt_path = gpt_path or dg
         sovits_path = sovits_path or ds
     for p in (gpt_path, sovits_path):
-        if not Path(p).is_absolute() and not (ROOT / p).exists():
-            print(f"权重不存在: {p}", file=sys.stderr)
+        if not resolve(p).exists():
+            print(f"权重不存在: {p}（cwd={Path.cwd()}）", file=sys.stderr)
             return 1
+    gpt_path, sovits_path = str(resolve(gpt_path)), str(resolve(sovits_path))
+
+    out_path = resolve(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     print("GPT    :", gpt_path)
     print("SoVITS :", sovits_path)
@@ -144,8 +178,6 @@ def main() -> int:
     dur = len(audio) / sr
     print(f"[推理] {time.time() - t0:.1f}s，输出 {dur:.2f}s @ {sr}Hz")
 
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         import soundfile as sf
 
@@ -158,11 +190,12 @@ def main() -> int:
         wavfile.write(str(out_path), sr, audio.astype("int16"))
 
     info = {"gpt": gpt_path, "sovits": sovits_path, "sr": int(sr),
-            "duration_sec": round(float(dur), 2), "text": args.text}
-    Path(args.out + ".json").write_text(
+            "duration_sec": round(float(dur), 2), "text": args.text,
+            "ref_audio": str(ref_audio), "gsv_root": str(GSV)}
+    out_path.with_suffix(out_path.suffix + ".json").write_text(
         json.dumps(info, ensure_ascii=False, indent=2), encoding="utf8"
     )
-    print("写出:", args.out, Path(args.out).stat().st_size, "bytes")
+    print("写出:", out_path, out_path.stat().st_size, "bytes")
     return 0
 
 
