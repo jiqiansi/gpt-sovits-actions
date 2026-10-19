@@ -140,11 +140,20 @@ jobs:
       - name: 收集微调产物
         if: inputs.mode != 'infer'
         run: |
+          set -e
+          # 导出目录名跟版本走：v1 是 GPT_weights / SoVITS_weights，v2 起才带后缀
+          if [ "$VERSION" = "v1" ]; then
+            GPT_DIR=GPT_weights; SOV_DIR=SoVITS_weights
+          else
+            GPT_DIR=GPT_weights_v2; SOV_DIR=SoVITS_weights_v2
+          fi
           mkdir -p artifacts/weights
-          cp -v GPT_weights_v2/*.ckpt  artifacts/weights/ 2>/dev/null || true
-          cp -v SoVITS_weights_v2/*.pth artifacts/weights/ 2>/dev/null || true
-          ls -lh artifacts/weights || true
-          du -sh artifacts/weights 2>/dev/null || true
+          cp -v "$GPT_DIR"/*.ckpt  artifacts/weights/
+          cp -v "$SOV_DIR"/*.pth artifacts/weights/
+          echo "== 收集到的权重 =="
+          ls -lh artifacts/weights
+          # cp 在 glob 不命中时会失败，加上 set -e 就不会静默传个空 artifact 上去
+          [ -n "$(ls -A artifacts/weights)" ]
 
       # ---------------------------------------------------------------- 合成
       - name: 合成语音

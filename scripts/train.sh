@@ -56,8 +56,10 @@ cd "$GSV" || exit 1
 # 所以权重落在那里。我们这里的 cwd 同样是 $GSV，但 workflow 收集产物和
 # tts_synthesize.py 找最新权重都是按 workspace 根算的 —— 写相对路径的话
 # 训练会成功、产物却永远收集不到，而且两边都不会报错。
-GPT_W="$REPO_DIR/GPT_weights_v2"
-SOV_W="$REPO_DIR/SoVITS_weights_v2"
+# 上游按版本把导出目录分开放：v1 是 GPT_weights / SoVITS_weights，
+# v2 及以后才带 _v2 后缀。这里跟 config.py 里的 GPT_weight_version2root 对齐。
+GPT_W="$REPO_DIR/GPT_weights$([ "$VERSION" = v1 ] && echo "" || echo "_v2")"
+SOV_W="$REPO_DIR/SoVITS_weights$([ "$VERSION" = v1 ] && echo "" || echo "_v2")"
 mkdir -p "$GPT_W" "$SOV_W"
 export GPT_W SOV_W
 
@@ -131,6 +133,11 @@ du -sh "$OUT"
 # 所以一律用引号版 <<'PYEOF'，把取值全部推到 os.environ。
 export OUT EXP_NAME GPT_BS GPT_EPOCHS S2_BS S2_EPOCHS VERSION PRE_S1 PRE_S2G PRE_S2D
 
+# s2_train 保存 checkpoint 时写的是 <exp_dir>/logs_s2_<version>/G_*.pth，
+# 但脚本自己从不建这个目录 —— webui 在 open1Ba 里替它建了，我们没有。
+# 训练全部跑完才在最后的 save_checkpoint 上炸，八轮白练。
+mkdir -p "$OUT/logs_s2_$VERSION"
+
 # ------------------------------------------------------------------ ⑤ 微调 GPT
 mark "⑤ s1_train.py：微调 GPT（$GPT_EPOCHS epoch）"
 S1_CFG="$OUT/tmp_s1.yaml"
@@ -195,6 +202,29 @@ print("s2 config ->", dst)
 PYEOF
 run_py "s2_train" GPT_SoVITS/s2_train.py --config "$S2_CFG"
 
-mark "微调完成，产物："
-find "$REPO_DIR/GPT_weights_v2" "$REPO_DIR/SoVITS_weights_v2" -type f 2>/dev/null | sort
-du -sh "$REPO_DIR/GPT_weights_v2" "$REPO_DIR/SoVITS_weights_v2" 2>/dev/null
+mark "微调产物校验"
+# 这是整条训练链的闸门。s1/s2 都可能「训练跑完了但导出没发生」——
+# 比如 s2 的 save_checkpoint 因为目录没人建而炸在最后一秒。
+# 与其让 job 绿着把空目录传上去，不如在这里拦死并打印实际落盘的东西。
+fail=0
+for d in "$GPT_W" "$SOV_W"; do
+  echo "--- $d ---"
+  if [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then
+    ls -lh "$d"
+    du -sh "$d"
+  else
+    echo "  (空)"; fail=1
+  fi
+done
+if [ "$fail" = "1" ]; then
+  echo "!! 训练结束但没有导出任何权重。常见原因：" >&2
+  echo "   - s2: <exp_dir>/logs_s2_<version>/ 目录不存在（save_checkpoint 会炸）" >&2
+  echo "   - s1: half_weights_save_dir 没被创建" >&2
+  echo "--- 训练中间目录 ---" >&2
+  ls -la "$OUT" 2>/dev/null | head -20 >&2
+  echo "--- logs_s2 ---" >&2
+  ls -la "$OUT/logs_s2_$VERSION" 2>/dev/null | head -10 >&2
+  exit 1
+fi
+echo "GPT 权重: $(ls "$GPT_W"/*.ckpt 2>/dev/null | wc -l) 个"
+echo "SoVITS 权重: $(ls "$SOV_W"/*.pth 2>/dev/null | wc -l) 个"

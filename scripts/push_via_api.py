@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -30,21 +31,36 @@ def token():
     return open(os.path.expanduser("~/.dsh/skills/github-actions-batch-render/token.txt")).read().strip()
 
 
-def api(method, path, payload=None):
+def api(method, path, payload=None, tries=5):
+    """带重试的 API 调用。
+
+    这台机器到 api.github.com 的连接会被远端掐（RemoteDisconnected / 读超时），
+    一次抖动就毁掉整轮推送。推送本身不是幂等操作，所以只对**幂等**的
+    GET 和幂等的 POST /git/blobs（同样内容返回同一个 sha）做重试；
+    commit / ref 这两步失败就直接停，让人重跑，避免产生重复提交。
+    """
     url = path if path.startswith("http") else BASE + path
     data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={
-        "Authorization": f"Bearer {token()}",
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "curl/8",
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=90) as r:
-            body = r.read()
-            return json.loads(body) if body else {}
-    except urllib.error.HTTPError as e:
-        print(f"!! {method} {url} -> {e.code}\n{e.read().decode()[:600]}", file=sys.stderr)
-        raise
+    last = None
+    for attempt in range(tries):
+        req = urllib.request.Request(url, data=data, method=method, headers={
+            "Authorization": f"Bearer {token()}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "curl/8",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                body = r.read()
+                return json.loads(body) if body else {}
+        except urllib.error.HTTPError as e:
+            print(f"!! {method} {url} -> {e.code}\n{e.read().decode()[:600]}", file=sys.stderr)
+            raise
+        except Exception as e:   # 连接被掐、读超时、半包
+            last = e
+            print(f"   [{attempt+1}/{tries}] {method} {url} 失败: {type(e).__name__}: {e}", file=sys.stderr)
+            if attempt + 1 < tries:
+                time.sleep(3 * (attempt + 1))
+    raise RuntimeError(f"API 调用重试 {tries} 次仍失败: {method} {url}") from last
 
 
 def git(*args, text=False):
@@ -67,9 +83,27 @@ def main():
     print(f"local  HEAD : {head[:10]}")
     print(f"remote main : {parent[:10]}")
 
-    # 相对远端新增/修改的文件（git 自己算，比手写可靠）
-    changed = git("diff", "--name-only", parent, head).decode().split("\n")
-    changed = [c for c in changed if c]
+    # 算出「相对远端改了哪些文件」。
+    # 不能用 git diff <remote_sha> HEAD —— 远端那个 commit 是 API 建的，
+    # 本地对象库里根本没有它，会直接 bad object。
+    # 改成拿远端 tree 的 path->sha，和本地 HEAD 里每个文件的 blob sha 对一遍，
+    # 全程只用本地 git 算 sha，不需要拉取远端对象。
+    remote_tree = api("GET", f"/git/trees/{parent}?recursive=1")["tree"]
+    remote_map = {e["path"]: e["sha"] for e in remote_tree if e.get("type") == "blob"}
+
+    local_paths = git("ls-tree", "-r", "--name-only", head).decode().split("\n")
+    changed = []
+    for path in local_paths:
+        if not path:
+            continue
+        local_sha = git("rev-parse", f"{head}:{path}".encode("utf8")).decode().strip()
+        if remote_map.get(path) != local_sha:
+            changed.append(path)
+    # 远端有、本地没有的文件本脚本不处理（本仓库不会删文件；真要删得另说）
+    gone = [p for p in remote_map if p not in set(local_paths)]
+    if gone:
+        print("!! 远端存在但本地已删除的文件，本脚本不会删除它们:", gone, file=sys.stderr)
+
     if not changed:
         print("远端已是最新，无需推送")
         return 0
@@ -78,7 +112,7 @@ def main():
         print("  -", c)
 
     # ---- blob ----
-    base_tree = api("GET", f"/git/trees/{parent}?recursive=1")
+    base_tree = parent
     blobs = {}
     for path in changed:
         raw = git("cat-file", "-p", f"{head}:{path}".encode("utf8"))
@@ -92,7 +126,7 @@ def main():
     # ---- tree：只列出改动项，未动的由 base_tree 保留 ----
     tree_entries = [{"path": p, "mode": "100644", "type": "blob", "sha": sha}
                     for p, sha in blobs.items()]
-    tree = api("POST", "/git/trees", {"base_tree": base_tree["sha"], "tree": tree_entries})
+    tree = api("POST", "/git/trees", {"base_tree": base_tree, "tree": tree_entries})
     print(f"tree -> {tree['sha'][:8]}")
 
     # ---- commit ----
